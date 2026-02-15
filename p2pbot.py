@@ -12,7 +12,7 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = "8503792556:AAE14E9hzN3ppo9ONcXVc2_cfNLZ9tsFe-Q"
+BOT_TOKEN = "1896346663:AAEI7ozhh2WaXV9W-eAXqIlCiAL0JRtEb8o"
 
 # ================== DB ==================
 conn = sqlite3.connect("exchange.db", check_same_thread=False)
@@ -85,7 +85,6 @@ def get_usdt_kzt_full():
     for item in items:
         price = float(item["adv"]["price"])
         nick = item["advertiser"]["nickName"]
-        # безопасно получаем bankName
         if item["adv"].get("tradeMethods"):
             bank = item["adv"]["tradeMethods"][0].get("bankName", "—")
         else:
@@ -96,7 +95,39 @@ def get_usdt_kzt_full():
         offers.append((price, nick, bank, min_amount, max_amount))
 
     offers.sort(key=lambda x: x[0])
-    return offers
+    return offers if len(offers) > 0 else []
+
+def get_usdt_try_full(trade_type="BUY"):
+    url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+    payload = {
+        "asset": "USDT",
+        "fiat": "TRY",
+        "tradeType": trade_type,
+        "page": 1,
+        "rows": 5
+    }
+    r = requests.post(url, json=payload, timeout=10)
+    items = r.json()["data"]
+
+    offers = []
+    for item in items:
+        price = float(item["adv"]["price"])
+        nick = item["advertiser"]["nickName"]
+        if item["adv"].get("tradeMethods"):
+            bank = item["adv"]["tradeMethods"][0].get("bankName", "—")
+        else:
+            bank = "—"
+
+        min_amount = float(item["adv"]["minSingleTransAmount"])
+        max_amount = float(item["adv"]["maxSingleTransAmount"])
+        offers.append((price, nick, bank, min_amount, max_amount))
+
+    if trade_type.upper() == "SELL":
+        offers.sort(key=lambda x: x[0], reverse=True)
+    else:
+        offers.sort(key=lambda x: x[0])
+
+    return offers if len(offers) > 0 else []
 
 # ================== График прибыли ==================
 def build_profit_chart():
@@ -152,9 +183,31 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     chat_ids = (YOUR_CHAT_ID, FRIEND_CHAT_ID)
 
-    # ====== STEP INPUT ======
     if chat_id in WAITING:
         step = WAITING[chat_id]
+
+        # ====== STEP INPUT ======
+        if "price_query" in step:
+            txt = text.strip().lower()
+            if "покуп" in txt:
+                offers = get_usdt_kzt_full()
+                msg = "📊 Лучшие предложения USDT/KZT (покупка):\n\n"
+                for price, nick, bank, min_amt, max_amt in offers:
+                    msg += f"💰 {price:.2f} KZT | 🏦 {bank} | 👤 {nick} | Сумма: {min_amt}-{max_amt} KZT\n"
+                await update.message.reply_text(msg, reply_markup=get_keyboard(chat_id))
+                del WAITING[chat_id]
+                return
+            elif "продаж" in txt or "продажа" in txt or "продать" in txt:
+                offers = get_usdt_try_full("SELL")
+                msg = "📊 Лучшие предложения USDT/TRY (продажа):\n\n"
+                for price, nick, bank, min_amt, max_amt in offers:
+                    msg += f"💰 {price:.2f} TRY | 🏦 {bank} | 👤 {nick} | Сумма: {min_amt}-{max_amt} TRY\n"
+                await update.message.reply_text(msg, reply_markup=get_keyboard(chat_id))
+                del WAITING[chat_id]
+                return
+            else:
+                await update.message.reply_text("Ответьте 'Покупка' или 'Продажа'")
+                return
 
         # ===== депозит =====
         if "deposit_action" in step:
@@ -228,11 +281,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ====== Кнопки ======
     if text == "📊 Цена":
-        offers = get_usdt_kzt_full()
-        msg = "📊 Лучшие предложения USDT/KZT:\n\n"
-        for price, nick, bank, min_amt, max_amt in offers:
-            msg += f"💰 {price:.2f} KZT | 🏦 {bank} | 👤 {nick} | Сумма: {min_amt}-{max_amt} KZT\n"
-        await update.message.reply_text(msg)
+        WAITING[chat_id] = {"price_query": True}
+        kb = ReplyKeyboardMarkup([["Покупка", "Продажа"]], resize_keyboard=True, one_time_keyboard=True)
+        await update.message.reply_text("Покупка или Продажа?", reply_markup=kb)
 
     elif text in ("➕ BUY", "➖ SELL"):
         WAITING[chat_id] = {
