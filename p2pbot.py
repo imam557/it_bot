@@ -12,7 +12,7 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = "1896346663:AAEI7ozhh2WaXV9W-eAXqIlCiAL0JRtEb8o"
+BOT_TOKEN = "8503792556:AAE14E9hzN3ppo9ONcXVc2_cfNLZ9tsFe-Q"
 
 # ================== DB ==================
 conn = sqlite3.connect("exchange.db", check_same_thread=False)
