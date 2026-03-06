@@ -6,7 +6,7 @@ import csv
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
-BOT_TOKEN = "1896364716:AAFlOe6oLs1a7u8TxAsXsMxBtqBzmWj1QHM"
+BOT_TOKEN = "8503792556:AAE14E9hzN3ppo9ONcXVc2_cfNLZ9tsFe-Q"
 
 YOUR_CHAT_ID = 822462684
 FRIEND_CHAT_ID = 6042777779
