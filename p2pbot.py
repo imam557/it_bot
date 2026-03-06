@@ -4,71 +4,94 @@ import requests
 import sqlite3
 import csv
 from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    CommandHandler,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
-BOT_TOKEN = "8503792556:AAE14E9hzN3ppo9ONcXVc2_cfNLZ9tsFe-Q"
+BOT_TOKEN = "1896364716:AAFlOe6oLs1a7u8TxAsXsMxBtqBzmWj1QHM"
 
-# ================== DB ==================
+YOUR_CHAT_ID = 822462684
+FRIEND_CHAT_ID = 6042777779
+
+# ================= DATABASE =================
+
 conn = sqlite3.connect("exchange.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Таблица сделок
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER,
-    side TEXT,
-    base TEXT,
-    quote TEXT,
-    base_amount REAL,
-    quote_amount REAL,
-    price REAL,
-    created_at TEXT
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+chat_id INTEGER,
+side TEXT,
+base TEXT,
+quote TEXT,
+base_amount REAL,
+quote_amount REAL,
+price REAL,
+created_at TEXT
 )
 """)
 
-# Настройки уведомлений
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS settings (
-    chat_id INTEGER PRIMARY KEY
-)
-""")
-
-# Таблица депозита
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS deposit (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER,
-    amount REAL,
-    type TEXT,  -- 'withdraw' или 'return'
-    created_at TEXT
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+chat_id INTEGER,
+amount REAL,
+type TEXT,
+created_at TEXT
 )
 """)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS circles (
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+chat_id INTEGER,
+created_at TEXT
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS circle_trades (
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+circle_id INTEGER,
+side TEXT,
+usdt REAL,
+fiat REAL
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS settings (
+chat_id INTEGER PRIMARY KEY
+)
+""")
+
 conn.commit()
 
-# ================== STATE ==================
 WAITING = {}
+CURRENT_CIRCLE = {}
 
-# ================== UI ==================
-def get_keyboard(chat_id: int):
-    keyboard = ReplyKeyboardMarkup(
+# ================= UI =================
+
+def main_keyboard():
+    return ReplyKeyboardMarkup(
         [
-            ["📊 Цена", "➕ BUY", "➖ SELL"],
-            ["📄 История", "💰 Прибыль"],
-            ["📈 График", "📤 Экспорт"],
-            ["💳 Взять депозит", "💵 Вернуть депозит", "💼 Депозит"],  # добавили кнопку депозита
+            ["📊 Цена"],
+            ["⭕ Создать круг","📚 Круги"],
+            ["💳 Взять депозит","💵 Вернуть депозит","💼 Депозит"]
         ],
         resize_keyboard=True
     )
-    return keyboard
 
-# ================== BINANCE ==================
+def circle_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["🟢 Купил","🔴 Продал"],
+            ["💾 Сохранить круг"]
+        ],
+        resize_keyboard=True
+    )
+
+# ================= BINANCE =================
+
 def get_usdt_kzt_full():
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     payload = {
@@ -79,7 +102,7 @@ def get_usdt_kzt_full():
         "rows": 5
     }
     r = requests.post(url, json=payload, timeout=10)
-    items = r.json()["data"]
+    items = r.json().get("data", [])
 
     offers = []
     for item in items:
@@ -107,7 +130,7 @@ def get_usdt_try_full(trade_type="BUY"):
         "rows": 5
     }
     r = requests.post(url, json=payload, timeout=10)
-    items = r.json()["data"]
+    items = r.json().get("data", [])
 
     offers = []
     for item in items:
@@ -129,45 +152,70 @@ def get_usdt_try_full(trade_type="BUY"):
 
     return offers if len(offers) > 0 else []
 
-# ================== График прибыли ==================
-def build_profit_chart():
-    chat_ids = (YOUR_CHAT_ID, FRIEND_CHAT_ID)
+# ================= CIRCLES =================
+
+def circle_stats(circle_id):
+    rows = cursor.execute(
+        "SELECT side,usdt,fiat FROM circle_trades WHERE circle_id=?",
+        (circle_id,)
+    ).fetchall()
+
+    buy_usdt = 0
+    sell_usdt = 0
+    spent = 0
+    received = 0
+
+    for side, usdt, fiat in rows:
+        if side == "BUY":
+            buy_usdt += usdt
+            spent += fiat
+        else:
+            sell_usdt += usdt
+            received += fiat
+
+    profit = received - spent
+
+    percent = 0
+    if spent > 0:
+        percent = (profit / spent) * 100
+
+    return buy_usdt, sell_usdt, profit, percent
+
+# ================= CHART =================
+
+def circle_chart():
     rows = cursor.execute("""
-        SELECT 
-            date(created_at) as day,
-            SUM(
-                CASE 
-                    WHEN side='SELL' THEN quote_amount
-                    WHEN side='BUY' THEN -quote_amount
-                END
-            ) as profit
-        FROM trades
-        WHERE chat_id IN (?, ?)
-        GROUP BY day
-        ORDER BY day
-    """, chat_ids).fetchall()
+    SELECT circles.id
+    FROM circles
+    ORDER BY id
+    """).fetchall()
 
     if not rows:
         return None
 
-    days = [r[0] for r in rows]
-    profits = [r[1] for r in rows]
+    profits = []
+    ids = []
 
-    plt.figure(figsize=(8, 4))
-    plt.plot(days, profits, marker="o")
+    for r in rows:
+        circle_id = r[0]
+        stats = circle_stats(circle_id)
+        profits.append(stats[2])
+        ids.append(circle_id)
+
+    plt.figure(figsize=(8,4))
+    plt.plot(ids, profits, marker="o")
     plt.axhline(0)
-    plt.title("Прибыль по дням (KZT)")
-    plt.xlabel("Дата")
-    plt.ylabel("Прибыль")
-    plt.grid(True)
-    plt.tight_layout()
-
-    path = "profit_chart.png"
+    plt.title("Profit by Circles")
+    plt.xlabel("Circle")
+    plt.ylabel("Profit")
+    plt.grid()
+    path = "circle_profit.png"
     plt.savefig(path)
     plt.close()
     return path
 
-# ================== HANDLERS ==================
+# ================= HANDLERS =================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     cursor.execute("INSERT OR IGNORE INTO settings (chat_id) VALUES (?)", (chat_id,))
@@ -175,7 +223,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🤖 IT_Exchange запущен",
-        reply_markup=get_keyboard(chat_id)
+        reply_markup=main_keyboard()
     )
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -186,7 +234,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id in WAITING:
         step = WAITING[chat_id]
 
-        # ====== STEP INPUT ======
+        # обработка запроса цены
         if "price_query" in step:
             txt = text.strip().lower()
             if "покуп" in txt:
@@ -194,7 +242,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg = "📊 Лучшие предложения USDT/KZT (покупка):\n\n"
                 for price, nick, bank, min_amt, max_amt in offers:
                     msg += f"💰 {price:.2f} KZT | 🏦 {bank} | 👤 {nick} | Сумма: {min_amt}-{max_amt} KZT\n"
-                await update.message.reply_text(msg, reply_markup=get_keyboard(chat_id))
+                await update.message.reply_text(msg, reply_markup=main_keyboard())
                 del WAITING[chat_id]
                 return
             elif "продаж" in txt or "продажа" in txt or "продать" in txt:
@@ -202,14 +250,14 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg = "📊 Лучшие предложения USDT/TRY (продажа):\n\n"
                 for price, nick, bank, min_amt, max_amt in offers:
                     msg += f"💰 {price:.2f} TRY | 🏦 {bank} | 👤 {nick} | Сумма: {min_amt}-{max_amt} TRY\n"
-                await update.message.reply_text(msg, reply_markup=get_keyboard(chat_id))
+                await update.message.reply_text(msg, reply_markup=main_keyboard())
                 del WAITING[chat_id]
                 return
             else:
                 await update.message.reply_text("Ответьте 'Покупка' или 'Продажа'")
                 return
 
-        # ===== депозит =====
+        # обработка депозита
         if "deposit_action" in step:
             try:
                 amount = float(text)
@@ -233,119 +281,108 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💰 Всего взято: {total_withdraw:.2f}\n"
                 f"💵 Всего возвращено: {total_return:.2f}\n"
                 f"⚖ Баланс: {balance:.2f} KZT",
-                reply_markup=get_keyboard(chat_id)
+                reply_markup=main_keyboard()
             )
             del WAITING[chat_id]
             return
 
-        # ===== сделки BUY/SELL =====
-        try:
-            value = float(text)
-        except:
-            await update.message.reply_text("Введите число")
-            return
+        # обработка ввода при созданном круге (купил/продал)
+        if "type" in step:
+            try:
+                value = float(text)
+            except:
+                await update.message.reply_text("Введите число")
+                return
 
-        if "base_amount" not in step:
-            step["base_amount"] = value
-            await update.message.reply_text("Сколько получил/отдал в KZT?")
-            return
+            # если ещё нет usdt в шаге — это первая цифра (USDT)
+            if "usdt" not in step:
+                step["usdt"] = value
+                await update.message.reply_text("Сколько KZT это стоило/дали?", reply_markup=None)
+                return
 
-        step["quote_amount"] = value
-        step["price"] = step["quote_amount"] / step["base_amount"]
+            # если есть usdt и нет fiat — сохраняем fiat и записываем в БД
+            if "fiat" not in step:
+                step["fiat"] = value
+                circle_id = CURRENT_CIRCLE.get(chat_id)
+                if not circle_id:
+                    await update.message.reply_text("Нет активного круга, сначала создайте его", reply_markup=main_keyboard())
+                    del WAITING[chat_id]
+                    return
 
+                side = "BUY" if step["type"] == "buy" else "SELL"
+                cursor.execute(
+                    "INSERT INTO circle_trades (circle_id, side, usdt, fiat) VALUES (?, ?, ?, ?)",
+                    (circle_id, side, step["usdt"], step["fiat"])
+                )
+                conn.commit()
+
+                await update.message.reply_text(
+                    f"✅ Записано: {side} {step['usdt']} USDT → {step['fiat']} KZT",
+                    reply_markup=circle_keyboard()
+                )
+                del WAITING[chat_id]
+                return
+
+    # ===== BUTTONS =====
+
+    if text == "⭕ Создать круг":
         cursor.execute(
-            """INSERT INTO trades 
-            (chat_id, side, base, quote, base_amount, quote_amount, price, created_at)
-            VALUES (?, ?, 'USDT', ?, ?, ?, ?, datetime('now'))""",
-            (
-                chat_id,
-                step["side"],
-                step["quote"],
-                step["base_amount"],
-                step["quote_amount"],
-                step["price"]
-            )
+            "INSERT INTO circles(chat_id,created_at) VALUES(?,datetime('now'))",
+            (chat_id,)
         )
         conn.commit()
-
+        circle_id = cursor.lastrowid
+        CURRENT_CIRCLE[chat_id] = circle_id
         await update.message.reply_text(
-            f"✅ Сделка сохранена\n"
-            f"{step['side']} USDT/{step['quote']}\n"
-            f"USDT: {step['base_amount']}\n"
-            f"{step['quote']}: {step['quote_amount']}\n"
-            f"Курс: {step['price']:.2f}",
-            reply_markup=get_keyboard(chat_id)
+            f"⭕ Круг {circle_id} создан",
+            reply_markup=circle_keyboard()
         )
-        del WAITING[chat_id]
-        return
 
-    # ====== Кнопки ======
-    if text == "📊 Цена":
+    elif text == "🟢 Купил":
+        WAITING[chat_id] = {"type": "buy"}
+        await update.message.reply_text("Сколько USDT купил?")
+
+    elif text == "🔴 Продал":
+        WAITING[chat_id] = {"type": "sell"}
+        await update.message.reply_text("Сколько USDT продал?")
+
+    elif text == "💾 Сохранить круг":
+        circle_id = CURRENT_CIRCLE.get(chat_id)
+        if not circle_id:
+            await update.message.reply_text("Нет активного круга")
+            return
+        stats = circle_stats(circle_id)
+        await update.message.reply_text(
+            f"⭕ Круг сохранён\n\n"
+            f"Куплено: {stats[0]} USDT\n"
+            f"Продано: {stats[1]} USDT\n"
+            f"Прибыль: {stats[2]:.2f}\n"
+            f"Доходность: {stats[3]:.2f}%"
+        )
+        del CURRENT_CIRCLE[chat_id]
+        await update.message.reply_text("Главное меню", reply_markup=main_keyboard())
+
+    elif text == "📚 Круги":
+        rows = cursor.execute(
+            "SELECT id FROM circles ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+        if not rows:
+            await update.message.reply_text("Нет кругов")
+            return
+        msg = "📚 Последние круги\n\n"
+        for r in rows:
+            stats = circle_stats(r[0])
+            msg += (
+                f"Круг {r[0]} | "
+                f"Profit {stats[2]:.2f} | "
+                f"{stats[3]:.2f}%\n"
+            )
+        await update.message.reply_text(msg)
+
+    elif text == "📊 Цена":
         WAITING[chat_id] = {"price_query": True}
         kb = ReplyKeyboardMarkup([["Покупка", "Продажа"]], resize_keyboard=True, one_time_keyboard=True)
         await update.message.reply_text("Покупка или Продажа?", reply_markup=kb)
-
-    elif text in ("➕ BUY", "➖ SELL"):
-        WAITING[chat_id] = {
-            "side": "BUY" if "BUY" in text else "SELL",
-            "quote": "KZT"
-        }
-        await update.message.reply_text("Сколько USDT?")
-
-    elif text == "📄 История":
-        rows = cursor.execute(
-            "SELECT side, base_amount, quote_amount, quote, price, created_at "
-            "FROM trades WHERE chat_id IN (?, ?) ORDER BY id DESC LIMIT 5",
-            chat_ids
-        ).fetchall()
-        if not rows:
-            await update.message.reply_text("История пуста")
-            return
-        msg = "📄 Последние сделки:\n\n"
-        for r in rows:
-            msg += f"{r[5][:16]} | {r[0]} {r[1]} USDT → {r[2]} {r[3]} | {r[4]:.2f}\n"
-        await update.message.reply_text(msg)
-
-    elif text == "💰 Прибыль":
-        buy = cursor.execute(
-            "SELECT SUM(quote_amount) FROM trades WHERE chat_id IN (?, ?) AND side='BUY'",
-            chat_ids
-        ).fetchone()[0] or 0
-        sell = cursor.execute(
-            "SELECT SUM(quote_amount) FROM trades WHERE chat_id IN (?, ?) AND side='SELL'",
-            chat_ids
-        ).fetchone()[0] or 0
-        await update.message.reply_text(
-            f"💰 Итог:\n\n"
-            f"Потрачено: {buy:.2f}\n"
-            f"Получено: {sell:.2f}\n"
-            f"Прибыль: {sell - buy:+.2f}"
-        )
-
-    elif text == "📤 Экспорт":
-        rows = cursor.execute(
-            "SELECT side, base, quote, base_amount, quote_amount, price, created_at "
-            "FROM trades WHERE chat_id IN (?, ?)",
-            chat_ids
-        ).fetchall()
-        with open("trades.csv", "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                ["Side", "Base", "Quote", "Base Amount", "Quote Amount", "Price", "Time"]
-            )
-            for r in rows:
-                writer.writerow(r)
-        await update.message.reply_document(open("trades.csv", "rb"))
-
-    elif text == "📈 График":
-        path = build_profit_chart()
-        if not path:
-            await update.message.reply_text("Пока нет данных для графика")
-            return
-        await update.message.reply_photo(
-            photo=open(path, "rb"),
-            caption="📈 Прибыль по дням (KZT)"
-        )
 
     elif text == "💳 Взять депозит":
         WAITING[chat_id] = {"deposit_action": "withdraw"}
@@ -365,26 +402,22 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (chat_id,)
         ).fetchone()[0] or 0
         balance = total_withdraw - total_return
+        await update.message.reply_text(
+            f"💼 Депозит:\n\n"
+            f"💰 Взято с депозита: {total_withdraw:.2f} KZT\n"
+            f"💵 Вернули: {total_return:.2f} KZT\n"
+            f"⚖ Осталось вернуть: {balance:.2f} KZT",
+            reply_markup=main_keyboard()
+        )
 
-    await update.message.reply_text(
-        f"💼 Депозит:\n\n"
-        f"💰 Взято с депозита: {total_withdraw:.2f} KZT\n"
-        f"💵 Вернули: {total_return:.2f} KZT\n"
-        f"⚖ Осталось вернуть: {balance:.2f} KZT",
-        reply_markup=get_keyboard(chat_id)
-    )
+# ================= MAIN =================
 
-
-# ================== MAIN ==================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
-    print("Бот запущен")
+    print("Bot started")
     app.run_polling()
 
 if __name__ == "__main__":
-    global YOUR_CHAT_ID, FRIEND_CHAT_ID
-    YOUR_CHAT_ID = 822462684
-    FRIEND_CHAT_ID = 6042777779
     main()
