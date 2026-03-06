@@ -6,7 +6,7 @@ import csv
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
-BOT_TOKEN = "8503792556:AAE14E9hzN3ppo9ONcXVc2_cfNLZ9tsFe-Q"
+BOT_TOKEN = "8503792556:AAE14E9hzN3ppo9ONcXVc2_cfNLZ9tsFe-Qgit"
 
 YOUR_CHAT_ID = 822462684
 FRIEND_CHAT_ID = 6042777779
@@ -68,6 +68,7 @@ conn.commit()
 
 WAITING = {}
 CURRENT_CIRCLE = {}
+CURRENT_QUICK = {}
 
 # ================= UI =================
 
@@ -76,6 +77,7 @@ def main_keyboard():
         [
             ["📊 Цена"],
             ["⭕ Создать круг","📚 Круги"],
+            ["🧮 Калькулятор круга"],
             ["💳 Взять депозит","💵 Вернуть депозит","💼 Депозит"]
         ],
         resize_keyboard=True
@@ -179,6 +181,29 @@ def circle_stats(circle_id):
     if spent > 0:
         percent = (profit / spent) * 100
 
+    return buy_usdt, sell_usdt, profit, percent
+
+def quick_circle_stats(trades):
+    buy_usdt = 0
+    sell_usdt = 0
+    spent = 0
+    received = 0
+
+    for t in trades:
+        side = t.get("side")
+        usdt = t.get("usdt", 0)
+        fiat = t.get("fiat", 0)
+        if side == "BUY":
+            buy_usdt += usdt
+            spent += fiat
+        else:
+            sell_usdt += usdt
+            received += fiat
+
+    profit = received - spent
+    percent = 0
+    if spent > 0:
+        percent = (profit / spent) * 100
     return buy_usdt, sell_usdt, profit, percent
 
 # ================= CHART =================
@@ -294,15 +319,29 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("Введите число")
                 return
 
-            # если ещё нет usdt в шаге — это первая цифра (USDT)
             if "usdt" not in step:
                 step["usdt"] = value
                 await update.message.reply_text("Сколько KZT это стоило/дали?", reply_markup=None)
                 return
 
-            # если есть usdt и нет fiat — сохраняем fiat и записываем в БД
             if "fiat" not in step:
                 step["fiat"] = value
+
+                # quick mode -> store in memory only
+                if step.get("quick_create"):
+                    trades = CURRENT_QUICK.get(chat_id, [])
+                    side = "BUY" if step["type"] == "buy" else "SELL"
+                    trades.append({"side": side, "usdt": step["usdt"], "fiat": step["fiat"]})
+                    CURRENT_QUICK[chat_id] = trades
+
+                    await update.message.reply_text(
+                        f"✅ Записан шаг (быстрый расчет): {side} {step['usdt']} USDT → {step['fiat']} KZT",
+                        reply_markup=circle_keyboard()
+                    )
+                    del WAITING[chat_id]
+                    return
+
+                # normal circle -> save to DB
                 circle_id = CURRENT_CIRCLE.get(chat_id)
                 if not circle_id:
                     await update.message.reply_text("Нет активного круга, сначала создайте его", reply_markup=main_keyboard())
@@ -338,15 +377,50 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=circle_keyboard()
         )
 
+    elif text == "🧮 Калькулятор круга":
+        CURRENT_QUICK[chat_id] = []
+        WAITING[chat_id] = {"quick_create": True}
+        await update.message.reply_text(
+            "Режим быстрого расчета. Добавьте шаг: '🟢 Купил' или '🔴 Продал'. Когда закончите нажмите '💾 Сохранить круг'.",
+            reply_markup=circle_keyboard()
+        )
+
     elif text == "🟢 Купил":
-        WAITING[chat_id] = {"type": "buy"}
+        if chat_id in WAITING and WAITING[chat_id].get("quick_create"):
+            WAITING[chat_id]["type"] = "buy"
+        else:
+            WAITING[chat_id] = {"type": "buy"}
         await update.message.reply_text("Сколько USDT купил?")
 
     elif text == "🔴 Продал":
-        WAITING[chat_id] = {"type": "sell"}
+        if chat_id in WAITING and WAITING[chat_id].get("quick_create"):
+            WAITING[chat_id]["type"] = "sell"
+        else:
+            WAITING[chat_id] = {"type": "sell"}
         await update.message.reply_text("Сколько USDT продал?")
 
     elif text == "💾 Сохранить круг":
+        # quick calculator finish
+        if chat_id in CURRENT_QUICK:
+            trades = CURRENT_QUICK.get(chat_id, [])
+            if not trades:
+                await update.message.reply_text("Нет шагов для расчета", reply_markup=main_keyboard())
+                return
+            stats = quick_circle_stats(trades)
+            await update.message.reply_text(
+                f"Результат быстрого расчета:\n\n"
+                f"Куплено: {stats[0]} USDT\n"
+                f"Продано: {stats[1]} USDT\n"
+                f"Прибыль: {stats[2]:.2f} KZT\n"
+                f"Доходность: {stats[3]:.2f}%",
+                reply_markup=main_keyboard()
+            )
+            del CURRENT_QUICK[chat_id]
+            if chat_id in WAITING:
+                del WAITING[chat_id]
+            return
+
+        # normal save existing circle
         circle_id = CURRENT_CIRCLE.get(chat_id)
         if not circle_id:
             await update.message.reply_text("Нет активного круга")
