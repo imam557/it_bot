@@ -3,10 +3,14 @@ from datetime import datetime
 import requests
 import sqlite3
 import csv
+import os
+import sys
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from telegram.error import InvalidToken
 
-BOT_TOKEN = "8503792556:AAE14E9hzN3ppo9ONcXVc2_cfNLZ9tsFe-Qgit"
+# BOT_TOKEN = "8503792556:AAE14E9hzN3ppo9ONcXVc2_cfNLZ9tsFe-Qgit"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8503792556:AAE14E9hzN3ppo9ONcXVc2_cfNLZ9tsFe-Q").strip()
 
 YOUR_CHAT_ID = 822462684
 FRIEND_CHAT_ID = 6042777779
@@ -189,16 +193,19 @@ def quick_circle_stats(trades):
     spent = 0
     received = 0
 
+    # В quick-режиме поле 'fiat' интерпретируем как цену за 1 USDT,
+    # поэтому считаем итоговую сумму как price * usdt
     for t in trades:
         side = t.get("side")
         usdt = t.get("usdt", 0)
-        fiat = t.get("fiat", 0)
+        price_per_usdt = t.get("fiat", 0)
+        total_fiat = price_per_usdt * usdt
         if side == "BUY":
             buy_usdt += usdt
-            spent += fiat
+            spent += total_fiat
         else:
             sell_usdt += usdt
-            received += fiat
+            received += total_fiat
 
     profit = received - spent
     percent = 0
@@ -331,14 +338,18 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if step.get("quick_create"):
                     trades = CURRENT_QUICK.get(chat_id, [])
                     side = "BUY" if step["type"] == "buy" else "SELL"
+                    # сохраняем цену за 1 USDT (fiat) и количество usdt
                     trades.append({"side": side, "usdt": step["usdt"], "fiat": step["fiat"]})
                     CURRENT_QUICK[chat_id] = trades
 
+                    total = step["fiat"] * step["usdt"]
                     await update.message.reply_text(
-                        f"✅ Записан шаг (быстрый расчет): {side} {step['usdt']} USDT → {step['fiat']} KZT",
+                        f"✅ Записан шаг (быстрый расчет): {side} {step['usdt']} USDT → {step['fiat']} KZT/USDT (итого {total:.2f} KZT)",
                         reply_markup=circle_keyboard()
                     )
-                    del WAITING[chat_id]
+
+                    # keep quick_create so user can add more steps
+                    WAITING[chat_id] = {"quick_create": True}
                     return
 
                 # normal circle -> save to DB
@@ -378,7 +389,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif text == "🧮 Калькулятор круга":
+        # reset quick mode state to avoid leftover steps from previous sessions
         CURRENT_QUICK[chat_id] = []
+        # remove any previous waiting state and start fresh quick_create
+        if chat_id in WAITING:
+            del WAITING[chat_id]
         WAITING[chat_id] = {"quick_create": True}
         await update.message.reply_text(
             "Режим быстрого расчета. Добавьте шаг: '🟢 Купил' или '🔴 Продал'. Когда закончите нажмите '💾 Сохранить круг'.",
@@ -388,6 +403,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🟢 Купил":
         if chat_id in WAITING and WAITING[chat_id].get("quick_create"):
             WAITING[chat_id]["type"] = "buy"
+            # clear any leftover numeric fields
+            WAITING[chat_id].pop("usdt", None)
+            WAITING[chat_id].pop("fiat", None)
         else:
             WAITING[chat_id] = {"type": "buy"}
         await update.message.reply_text("Сколько USDT купил?")
@@ -395,6 +413,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🔴 Продал":
         if chat_id in WAITING and WAITING[chat_id].get("quick_create"):
             WAITING[chat_id]["type"] = "sell"
+            WAITING[chat_id].pop("usdt", None)
+            WAITING[chat_id].pop("fiat", None)
         else:
             WAITING[chat_id] = {"type": "sell"}
         await update.message.reply_text("Сколько USDT продал?")
@@ -487,11 +507,20 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= MAIN =================
 
 def main():
+    if not BOT_TOKEN:
+        print('Error: BOT_TOKEN not set. Set environment variable BOT_TOKEN and restart, e.g.:')
+        print('  export BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"')
+        sys.exit(1)
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     print("Bot started")
-    app.run_polling()
+    try:
+        app.run_polling()
+    except InvalidToken:
+        print("Invalid bot token: the Telegram API rejected the token. Set a valid BOT_TOKEN environment variable.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
