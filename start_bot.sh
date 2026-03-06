@@ -3,8 +3,8 @@
 # ============================
 # Настройки
 # ============================
-REPO_URL="https://github.com/username/repo.git"  # ссылка на твой GitHub
-BOT_DIR="$HOME/bot"                               # путь, где будет бот
+REPO_URL="https://github.com/imam557/it_bot"  # ссылка на твой GitHub
+BOT_DIR="$HOME/bot/it_bot"                               # путь, где будет бот
 SCREEN_NAME="mybot"                               # имя screen
 PYTHON_CMD="python3"                              
 
